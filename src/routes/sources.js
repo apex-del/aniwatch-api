@@ -37,7 +37,7 @@ async function fetchWithFallback(urls, path, params = {}) {
     throw new Error(`All sources failed: ${errors.join(', ')}`);
 }
 
-sources.get('/sources', async (req, res) => {
+sources.get('/', async (req, res) => {
     const { id, server, category } = req.query;
     
     if (!id) {
