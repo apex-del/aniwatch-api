@@ -29,11 +29,22 @@ async function getSourceLink(serverId, serverType = 'sub') {
                 timeout: 10000
             });
             
-            if (response.data && response.data.link) {
+            // The response might be coming as a function wrapper
+            // Check if it's a string that needs parsing
+            let data = response.data;
+            if (typeof data === 'string') {
+                // Try to extract JSON from string
+                const jsonMatch = data.match(/\{.+\}/);
+                if (jsonMatch) {
+                    data = JSON.parse(jsonMatch[0]);
+                }
+            }
+            
+            if (data && data.link) {
                 return {
-                    link: response.data.link,
+                    link: data.link,
                     domain: domain,
-                    server: response.data.server
+                    server: data.server
                 };
             }
         } catch (e) {
