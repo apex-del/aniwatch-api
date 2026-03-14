@@ -9,7 +9,6 @@ const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 
 sources.use(cors());
 
-// Same backend sources
 const BASE_URLS = [
     'https://aniwatchtv.to',
     'https://aniwatch.to',
@@ -38,9 +37,7 @@ async function fetchWithFallback(urls, path, params = {}) {
     throw new Error(`All sources failed: ${errors.join(', ')}`);
 }
 
-// Get streaming sources for an episode - compatible with old HiAnime API format
-// Query params: id (episode ID), server (hd-1, hd-2), category (sub, dub)
-sources.get('/', async (req, res) => {
+sources.get('/sources', async (req, res) => {
     const { id, server, category } = req.query;
     
     if (!id) {

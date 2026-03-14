@@ -26,7 +26,7 @@ try {
     inde.use('/api', shedule);
     inde.use('/api', server);
     inde.use('/api', src);
-    inde.use('/api', sources);
+    inde.use('/api/sources', sources);
 
     inde.get('/', (req, res) =>{
         res.send("Api Is ON SERVICE !");
