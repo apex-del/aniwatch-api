@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "src/inde.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "src/inde.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "src/inde.js"
+    }
+  ]
+}
