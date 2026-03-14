@@ -92,44 +92,21 @@ compat.get('/anime/:id/episodes', async (req, res) => {
     const animeId = req.params.id;
     
     try {
-        // Get anime page to find episode list ID
-        const animeUrl = `/${animeId}`;
-        const animeRes = await axios.get(`${BASE_URLS[0]}${animeUrl}`, {
-            headers: { 'User-Agent': USER_AGENT }
-        });
+        // Use existing episode endpoint which works!
+        const epUrl = `https://aniwatch-api-zeta-dusky.vercel.app/api/episode/${animeId}`;
+        const epRes = await axios.get(epUrl, { timeout: 15000 });
         
-        const $ = cheerio.load(animeRes.data);
-        const episodeId = $('#syncData').text().match(/episodeId":"(\d+)"/)?.[1];
+        const epData = epRes.data;
+        const episodes = epData.episodetown || [];
         
-        if (!episodeId) {
-            return res.json({ data: { episodes: [] } });
-        }
+        // Convert to compatible format
+        const formattedEpisodes = episodes.map((ep, i) => ({
+            number: parseInt(ep.order) || i + 1,
+            title: ep.name,
+            episodeId: ep.epId.split('ep=')[1] || ''
+        }));
         
-        // Get episodes
-        const epUrl = `/ajax/v2/episode/list/${episodeId}`;
-        const epRes = await fetchWithFallback([epUrl]);
-        
-        if (!epRes) {
-            return res.json({ data: { episodes: [] } });
-        }
-        
-        const $$ = cheerio.load(epRes.data.html || epRes.data);
-        const episodes = [];
-        
-        $$('.ssl-item.ep-item').each(function(i) {
-            const epNum = $$(this).find('.ssli-order').text().trim();
-            const epName = $$(this).find('.e-dynamic-name').text().trim();
-            const epLink = $$(this).attr('href') || '';
-            const epIdMatch = epLink.match(/ep=(\d+)/);
-            
-            episodes.push({
-                number: parseInt(epNum) || i + 1,
-                title: epName,
-                episodeId: epIdMatch ? epIdMatch[1] : ''
-            });
-        });
-        
-        res.json({ data: { episodes } });
+        res.json({ data: { episodes: formattedEpisodes } });
         
     } catch (e) {
         console.error('Episodes error:', e.message);
