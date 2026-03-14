@@ -17,6 +17,7 @@ const BASE_URLS = [
 
 const MEGACLOUD_BASE = 'https://megacloud.tv';
 const KEY_URL = 'https://raw.githubusercontent.com/ryanwtf88/megacloud-keys/refs/heads/master/key.txt';
+const KEY_ALT_URL = 'https://gist.githubusercontent.com/eggwite/main/raw/key.txt';
 
 let cachedKey = null;
 let keyLastFetched = 0;
@@ -56,8 +57,17 @@ async function getDecryptionKey() {
         keyLastFetched = now;
         return cachedKey;
     } catch (error) {
-        if (cachedKey) return cachedKey;
-        throw new Error('Unable to fetch decryption key');
+        console.log('Primary key URL failed, trying alternative...');
+        try {
+            const { data: key } = await axios.get(KEY_ALT_URL, { timeout: 5000 });
+            cachedKey = key.trim();
+            keyLastFetched = now;
+            return cachedKey;
+        } catch (error2) {
+            console.log('Alternative key URL also failed');
+            if (cachedKey) return cachedKey;
+            throw new Error('Unable to fetch decryption key');
+        }
     }
 }
 
