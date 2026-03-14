@@ -16,6 +16,7 @@ const BASE_URLS = ['https://aniwatchtv.to', 'https://aniwatch.to'];
 const MEGACLOUD_BASE = 'https://megacloud.tv';
 const KEY_URL = 'https://raw.githubusercontent.com/ryanwtf88/megacloud-keys/refs/heads/master/key.txt';
 const KEY_ALT_URL = 'https://gist.githubusercontent.com/eggwite/main/raw/key.txt';
+const PROXY_URL = 'https://hianime-api-proxy.anonymous-0709200.workers.dev';
 
 let cachedKey = null;
 let keyLastFetched = 0;
@@ -68,8 +69,15 @@ async function getDecryptionKey() {
 
 async function extractToken(url) {
     try {
-        const { data: html } = await axios.get(url, {
-            headers: {
+        let fetchUrl = url;
+        let useProxy = url.includes('megacloud');
+        
+        if (useProxy) {
+            fetchUrl = `${PROXY_URL}/?url=${encodeURIComponent(url)}&referer=${encodeURIComponent(MEGACLOUD_BASE + '/')}`;
+        }
+        
+        const { data: html } = await axios.get(fetchUrl, {
+            headers: useProxy ? {} : {
                 'User-Agent': USER_AGENT,
                 'Referer': MEGACLOUD_BASE + '/',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -111,6 +119,8 @@ async function decryptSources(embedLink, key) {
             throw new Error('Could not extract embed ID');
         }
 
+        const isMegacloud = embedDomain.includes('megacloud');
+        
         const tokenUrl = `${embedDomain}/${embedId}?k=1&autoPlay=0&oa=0&asi=1`;
         const token = await extractToken(tokenUrl);
         
@@ -118,16 +128,20 @@ async function decryptSources(embedLink, key) {
             throw new Error('Failed to extract token');
         }
 
-        const { data } = await axios.get(
-            `${embedDomain}/getSources?id=${embedId}&_k=${token}`,
-            {
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Referer': `${embedDomain}/${embedId}`,
-                },
-                timeout: 15000
-            }
-        );
+        let sourcesUrl;
+        if (isMegacloud) {
+            sourcesUrl = `${PROXY_URL}/?url=${encodeURIComponent(`${embedDomain}/getSources?id=${embedId}&_k=${token}`)}&referer=${encodeURIComponent(embedLink)}`;
+        } else {
+            sourcesUrl = `${embedDomain}/getSources?id=${embedId}&_k=${token}`;
+        }
+        
+        const { data } = await axios.get(sourcesUrl, {
+            headers: isMegacloud ? {} : {
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': `${embedDomain}/${embedId}`,
+            },
+            timeout: 15000
+        });
 
         const encrypted = data?.sources;
         if (!encrypted) {
