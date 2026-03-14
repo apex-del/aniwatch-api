@@ -12,6 +12,7 @@ const shedule = require('./routes/shedule.js');
 const server = require('./routes/server.js');
 const src = require('./routes/src1.js');
 const sources = require('./routes/sources.js');
+const compat = require('./routes/compat.js');
 
 const inde = express();
 
@@ -27,6 +28,7 @@ try {
     inde.use('/api', server);
     inde.use('/api', src);
     inde.use('/api/sources', sources);
+    inde.use('/api/v2/hianime', compat);  // HiAnime compatible endpoints
 
     inde.get('/', (req, res) =>{
         res.send("Api Is ON SERVICE !");
