@@ -274,11 +274,19 @@ sources.get('/', async (req, res) => {
             } catch (e) {
                 console.log('Megacloud decryption failed:', e.message);
             }
+            
+            // Fallback: return embed URL if no m3u8 found (for iframe embedding)
+            if (!m3u8Url) {
+                m3u8Url = embedLink;
+            }
         }
+        
+        // Determine if it's an m3u8 or embed URL
+        const isEmbedUrl = embedLink && m3u8Url === embedLink;
         
         res.json({
             data: {
-                sources: m3u8Url ? [{ url: m3u8Url, type: 'hls' }] : [],
+                sources: m3u8Url ? [{ url: m3u8Url, type: isEmbedUrl ? 'embed' : 'hls' }] : [],
                 embed: embedLink,
                 server: selectedServer.name,
                 tracks: tracks,

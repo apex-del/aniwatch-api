@@ -317,11 +317,18 @@ compat.get('/episode/sources', async (req, res) => {
             } catch (e) {
                 console.log('M3U8 extraction failed:', e.message);
             }
+            
+            // Fallback to embed URL
+            if (!m3u8Url && embedLink) {
+                m3u8Url = embedLink;
+            }
         }
+        
+        const isEmbedUrl = embedLink && m3u8Url === embedLink;
         
         res.json({
             data: {
-                sources: m3u8Url ? [{ url: m3u8Url, type: 'hls' }] : [],
+                sources: m3u8Url ? [{ url: m3u8Url, type: isEmbedUrl ? 'embed' : 'hls' }] : [],
                 embed: embedLink,
                 tracks: tracks,
                 intro: intro,
@@ -405,11 +412,17 @@ compat.get('/stream', async (req, res) => {
             } catch (e) {
                 console.log('Stream decryption failed:', e.message);
             }
+            
+            if (!m3u8Url) {
+                m3u8Url = embedLink;
+            }
         }
+        
+        const isEmbedUrl = embedLink && m3u8Url === embedLink;
         
         res.json({
             data: {
-                sources: m3u8Url ? [{ url: m3u8Url, type: 'hls' }] : [],
+                sources: m3u8Url ? [{ url: m3u8Url, type: isEmbedUrl ? 'embed' : 'hls' }] : [],
                 embed: embedLink,
                 tracks: tracks,
                 server: selectedServer.name

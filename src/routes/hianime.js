@@ -606,12 +606,18 @@ hianime.get('/stream', async (req, res) => {
             } catch (e) {
                 console.log('M3U8 extraction failed:', e.message);
             }
+            
+            if (!m3u8Url && embedLink) {
+                m3u8Url = embedLink;
+            }
         }
+        
+        const isEmbedUrl = embedLink && m3u8Url === embedLink;
         
         res.json({
             success: true,
             data: {
-                sources: m3u8Url ? [{ url: m3u8Url, type: 'hls' }] : [],
+                sources: m3u8Url ? [{ url: m3u8Url, type: isEmbedUrl ? 'embed' : 'hls' }] : [],
                 embed: embedLink,
                 server: selectedServer.name,
                 tracks: tracks,
