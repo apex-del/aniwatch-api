@@ -4,168 +4,103 @@ const crypto = require("crypto");
 
 const src1 = express();
 
-const USER_AGENT ="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36";
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36";
+const MEGACLOUD_KEY_URL = "https://raw.githubusercontent.com/ryanwtf88/megacloud-keys/refs/heads/master/key.txt";
 
-const megacloud = {
-  script: "https://megacloud.tv/js/player/a/prod/e1-player.min.js?v=",
-  sources: "https://megacloud.tv/embed-2/ajax/e-1/getSources?id=",
-};
+let cachedKey = null;
+let keyLastFetched = 0;
+const KEY_CACHE_DURATION = 3600000; // 1 hour
 
-class MegaCloud {
-  constructor() {
-    this.serverName = "megacloud";
+async function getDecryptionKey() {
+  const now = Date.now();
+  if (cachedKey && (now - keyLastFetched) < KEY_CACHE_DURATION) {
+    return cachedKey;
   }
-
-  async extract(videoUrl) {
-    try {
-      const extractedData = {
-        tracks: [],
-        intro: { start: 0, end: 0 },
-        outro: { start: 0, end: 0 },
-        sources: [],
-      };
-
-      const videoId = videoUrl?.href?.split("/")?.pop()?.split("?")[0];
-      const { data: srcsData } = await axios.get(
-        megacloud.sources.concat(videoId || ""),
-        {
-          headers: {
-            Accept: "*/*",
-            "X-Requested-With": "XMLHttpRequest",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36",
-            Referer: videoUrl.href,
-          },
-        }
-      );
-      if (!srcsData) {
-        throw new Error("Url may have an invalid video id");
-      }
-
-      const encryptedString = srcsData.sources;
-      if (!srcsData.encrypted && Array.isArray(encryptedString)) {
-        extractedData.intro = srcsData.intro;
-        extractedData.outro = srcsData.outro;
-        extractedData.tracks = srcsData.tracks;
-        extractedData.sources = encryptedString.map((s) => ({
-          url: s.file,
-          type: s.type,
-        }));
-        return extractedData;
-      }
-
-      const { data } = await axios.get(megacloud.script.concat(Date.now().toString()));
-      const text = data;
-      if (!text) {
-        throw new Error("Couldn't fetch script to decrypt resource");
-      }
-
-      const vars = this.extractVariables(text);
-      if (!vars.length) {
-        throw new Error("Can't find variables. Perhaps the extractor is outdated.");
-      }
-
-      const { secret, encryptedSource } = this.getSecret(encryptedString, vars);
-      const decrypted = this.decrypt(encryptedSource, secret);
-      try {
-        const sources = JSON.parse(decrypted);
-        extractedData.intro = srcsData.intro;
-        extractedData.outro = srcsData.outro;
-        extractedData.tracks = srcsData.tracks;
-        extractedData.sources = sources.map((s) => ({
-          url: s.file,
-          type: s.type,
-        }));
-        return extractedData;
-      } catch (error) {
-        throw new Error("Failed to decrypt resource");
-      }
-    } catch (err) {
-      throw err;
-    }
-  }
-
-  extractVariables(text) {
-    const regex = /case\s*0x[0-9a-f]+:(?![^;]*=partKey)\s*\w+\s*=\s*(\w+)\s*,\s*\w+\s*=\s*(\w+);/g;
-    const matches = text.matchAll(regex);
-    const vars = Array.from(matches, (match) => {
-      const matchKey1 = this.matchingKey(match[1], text);
-      const matchKey2 = this.matchingKey(match[2], text);
-      try {
-        return [parseInt(matchKey1, 16), parseInt(matchKey2, 16)];
-      } catch (e) {
-        return [];
-      }
-    }).filter((pair) => pair.length > 0);
-    return vars;
-  }
-
-  getSecret(encryptedString, values) {
-    let secret = "", encryptedSource = "", encryptedSourceArray = encryptedString.split(""), currentIndex = 0;
-    for (const index of values) {
-      const start = index[0] + currentIndex;
-      const end = start + index[1];
-      for (let i = start; i < end; i++) {
-        secret += encryptedString[i];
-        encryptedSourceArray[i] = "";
-      }
-      currentIndex += index[1];
-    }
-    encryptedSource = encryptedSourceArray.join("");
-    return { secret, encryptedSource };
-  }
-
-  decrypt(encrypted, keyOrSecret, maybe_iv) {
-    let key, iv, contents;
-    if (maybe_iv) {
-      key = keyOrSecret;
-      iv = maybe_iv;
-      contents = encrypted;
-    } else {
-      const cypher = Buffer.from(encrypted, "base64");
-      const salt = cypher.subarray(8, 16);
-      const password = Buffer.concat([Buffer.from(keyOrSecret, "binary"), salt]);
-      const md5Hashes = [];
-      let digest = password;
-      for (let i = 0; i < 3; i++) {
-        md5Hashes[i] = crypto.createHash("md5").update(digest).digest();
-        digest = Buffer.concat([md5Hashes[i], password]);
-      }
-      key = Buffer.concat([md5Hashes[0], md5Hashes[1]]);
-      iv = md5Hashes[2];
-      contents = cypher.subarray(16);
-    }
-    const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
-    const decrypted = decipher.update(contents, typeof contents === "string" ? "base64" : undefined, "utf8") + decipher.final();
-    return decrypted;
-  }
-
-  matchingKey(value, script) {
-    const regex = new RegExp(`,${value}=((?:0x)?([0-9a-fA-F]+))`);
-    const match = script.match(regex);
-    if (match) return match[1].replace(/^0x/, "");
-    throw new Error("Failed to match the key");
+  try {
+    const { data } = await axios.get(MEGACLOUD_KEY_URL, { timeout: 5000 });
+    cachedKey = data.trim();
+    keyLastFetched = now;
+    return cachedKey;
+  } catch (e) {
+    console.log('Failed to fetch key:', e.message);
+    return cachedKey || 'c05d6f8a9b2e4d1f3a7c8e9b0d1f2a3c';
   }
 }
 
-const megaCloudInstance = new MegaCloud();
+async function extractToken(url) {
+  try {
+    const { data } = await axios.get(url, {
+      headers: { 'User-Agent': USER_AGENT },
+      timeout: 10000
+    });
+    const match = data.match(/eval\(function\(.*?\}\s*\(.*?\)\)\)/);
+    if (!match) return null;
+    const script = match[0];
+    const varMatch = script.match(/window\["(.*?)"\]/);
+    if (varMatch) {
+      const key = varMatch[1];
+      const keyValueMatch = script.match(new RegExp(`${key}\\s*=\\s*["']([^"']+)["']`));
+      return keyValueMatch ? keyValueMatch[1] : null;
+    }
+    return null;
+  } catch (e) {
+    console.log('Token extract error:', e.message);
+    return null;
+  }
+}
+
+function decryptSources(encrypted, key) {
+  try {
+    if (typeof encrypted !== 'string') {
+      return encrypted;
+    }
+    const decrypted = crypto.createDecipheriv('aes-256-cbc', Buffer.from(key.slice(0, 32), 'utf8'), Buffer.from(key.slice(32, 48), 'utf8'));
+    let result = decrypted.update(encrypted, 'base64', 'utf8');
+    result += decrypted.final('utf8');
+    return JSON.parse(result);
+  } catch (e) {
+    console.log('Decrypt error:', e.message);
+    return null;
+  }
+}
 
 src1.get('/src-server/:id', async (req, res) => {
   try {
-    const servernum = parseInt(req.params.id);
-    const serverlink = `https://aniwatchtv.to/ajax/v2/episode/sources?id=${servernum}`;
-    const serreq = await axios.get(serverlink, {
-      headers: { 'User-Agent': USER_AGENT, 'Referer': 'https://aniwatchtv.to/' }
+    const srcId = req.params.id;
+    console.log('Getting stream for srcId:', srcId);
+    
+    // Try direct megacloud source (if available)
+    const sourcesUrl = `https://megacloud.tv/embed-2/ajax/e-1/getSources?id=${srcId}`;
+    
+    const { data } = await axios.get(sourcesUrl, {
+      headers: {
+        'User-Agent': USER_AGENT,
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': 'https://megacloud.tv/'
+      },
+      timeout: 15000
     });
-    const serres = serreq.data;
-    if (!serres.link) {
-      return res.status(500).json({ error: 'No link found' });
+    
+    if (!data.sources) {
+      return res.status(404).json({ error: 'No sources found' });
     }
-    const serhash = serres.link.split('/e-1/')[1].split('?k=1')[0];
-    const videoUrl = new URL(`https://megacloud.tv/embed-2/e-1/${serhash}?k=1`);
-    const result = await megaCloudInstance.extract(videoUrl);
-    res.json({ rest: result });
+    
+    let sources = data.sources;
+    if (typeof sources === 'string' && data.encrypted) {
+      const key = await getDecryptionKey();
+      sources = decryptSources(sources, key);
+    }
+    
+    const result = {
+      sources: sources.map(s => ({ file: s.file, type: s.type })),
+      tracks: data.tracks || [],
+      intro: data.intro || { start: 0, end: 0 },
+      outro: data.outro || { start: 0, end: 0 }
+    };
+    
+    res.json({ serverSrc: [{ rest: result.sources }] });
   } catch (error) {
-    console.error('Error:', error.message);
+    console.error('Stream error:', error.message);
     res.status(500).json({ error: 'Failed to get stream: ' + error.message });
   }
 });
