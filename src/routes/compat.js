@@ -12,6 +12,29 @@ const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 compat.use(cors());
 
 const BASE_URLS = ['https://aniwatchtv.to', 'https://aniwatch.to'];
+const PROXY_URL = 'https://hianime-api-proxy.anonymous-0709200.workers.dev';
+
+// Helper to fetch with fallback
+async function fetchWithFallback(paths, params = {}) {
+    for (const baseUrl of BASE_URLS) {
+        try {
+            const url = `${baseUrl}${paths[0]}`;
+            const response = await axios.get(url, {
+                headers: {
+                    'User-Agent': USER_AGENT,
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Referer': `${baseUrl}/`
+                },
+                timeout: 15000,
+                ...params
+            });
+            return { data: response.data, baseUrl };
+        } catch (e) {
+            continue;
+        }
+    }
+    return null;
+}
 
 // Helper to fetch with fallback
 async function fetchWithFallback(paths, params = {}) {
@@ -167,22 +190,19 @@ compat.get('/episode/sources', async (req, res) => {
         let m3u8Url = null;
         let tracks = [];
         
-        // Try to get m3u8 from embed
+        // Try to get m3u8 from embed using proxy
         if (embedLink) {
             const embedDomain = embedLink.match(/https?:\/\/[^/]+/)?.[0] || 'https://megacloud.blog';
             const embedId = embedLink.split('/e-1/')[1]?.split('?')[0];
             
             if (embedId) {
                 try {
-                    const m3u8UrlFull = `${embedDomain}/getSources?id=${embedId}`;
-                    const m3u8Res = await axios.get(m3u8UrlFull, {
-                        headers: {
-                            'User-Agent': USER_AGENT,
-                            'X-Requested-With': 'XMLHttpRequest',
-                            'Referer': embedLink
-                        },
-                        timeout: 15000
-                    }).catch(() => null);
+                    // Try direct first (works from local, not from Vercel)
+                    const directUrl = `${embedDomain}/getSources?id=${embedId}`;
+                    
+                    // Try with proxy
+                    const proxyUrl = `${PROXY_URL}/?url=${encodeURIComponent(directUrl)}&referer=${encodeURIComponent(embedLink)}`;
+                    const m3u8Res = await axios.get(proxyUrl, { timeout: 15000 }).catch(() => null);
                     
                     if (m3u8Res?.data?.sources) {
                         m3u8Url = m3u8Res.data.sources[0]?.file;
