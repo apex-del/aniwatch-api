@@ -14,9 +14,8 @@ compat.use(cors());
 
 const BASE_URLS = ['https://aniwatchtv.to', 'https://aniwatch.to'];
 const MEGACLOUD_BASE = 'https://megacloud.tv';
-const KEY_URL = 'https://raw.githubusercontent.com/ryanwtf88/megacloud-keys/refs/heads/master/key.txt';
-const KEY_ALT_URL = 'https://gist.githubusercontent.com/eggwite/main/raw/key.txt';
 const PROXY_URL = 'https://hianime-api-proxy.anonymous-0709200.workers.dev';
+const KEY_URL = 'https://raw.githubusercontent.com/ryanwtf88/megacloud-keys/refs/heads/master/key.txt';
 
 let cachedKey = null;
 let keyLastFetched = 0;
@@ -54,123 +53,111 @@ async function getDecryptionKey() {
         keyLastFetched = now;
         return cachedKey;
     } catch (error) {
-        console.log('Primary key failed, trying alternative...');
-        try {
-            const { data: key } = await axios.get(KEY_ALT_URL, { timeout: 5000 });
-            cachedKey = key.trim();
-            keyLastFetched = now;
-            return cachedKey;
-        } catch (error2) {
-            if (cachedKey) return cachedKey;
-            throw new Error('Unable to fetch decryption key');
-        }
+        if (cachedKey) return cachedKey;
+        return 'bQ!s8H@k#p2$Ln5m9';
     }
 }
 
-async function extractToken(url) {
+// Simple flow: embed -> extract ID -> call API -> decrypt -> m3u8
+async function getStreamUrl(embedLink) {
     try {
-        let fetchUrl = url;
-        let useProxy = url.includes('megacloud');
+        const isMegacloud = embedLink.includes('megacloud');
+        const fetchUrl = isMegacloud 
+            ? `${PROXY_URL}/?url=${encodeURIComponent(embedLink)}&referer=${encodeURIComponent(MEGACLOUD_BASE)}`
+            : embedLink;
         
-        if (useProxy) {
-            fetchUrl = `${PROXY_URL}/?url=${encodeURIComponent(url)}&referer=${encodeURIComponent(MEGACLOUD_BASE + '/')}`;
-        }
-        
-        const { data: html } = await axios.get(fetchUrl, {
-            headers: useProxy ? {} : {
-                'User-Agent': USER_AGENT,
-                'Referer': MEGACLOUD_BASE + '/',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            },
-            timeout: 10000
-        });
-
-        const $ = cheerio.load(html);
-
-        const meta = $('meta[name="_gg_fb"]').attr('content');
-        if (meta && meta.length >= 10) return meta;
-
-        const dpi = $('[data-dpi]').attr('data-dpi');
-        if (dpi && dpi.length >= 10) return dpi;
-
-        const nonceScript = $('script[nonce]')
-            .filter((i, el) => $(el).text().includes('nonce'))
-            .attr('nonce');
-        if (nonceScript && nonceScript.length >= 10) return nonceScript;
-
-        const stringAssignRegex = /window\.(\w+)\s*=\s*["']([a-zA-Z0-9_-]{10,})["']/g;
-        const stringMatches = [...html.matchAll(stringAssignRegex)];
-        for (const [, key, value] of stringMatches) {
-            if (value.length >= 10) return value;
-        }
-
-        throw new Error('No token found');
-    } catch (error) {
-        return null;
-    }
-}
-
-async function decryptSources(embedLink, key) {
-    try {
-        const embedDomain = embedLink.match(/https?:\/\/[^/]+/)?.[0] || MEGACLOUD_BASE;
-        const embedId = embedLink.split('/e-1/')[1]?.split('?')[0] || embedLink.split('/e-2/')[1]?.split('?')[0];
-        
-        if (!embedId) {
-            throw new Error('Could not extract embed ID');
-        }
-
-        const isMegacloud = embedDomain.includes('megacloud');
-        
-        const tokenUrl = `${embedDomain}/${embedId}?k=1&autoPlay=0&oa=0&asi=1`;
-        const token = await extractToken(tokenUrl);
-        
-        if (!token) {
-            throw new Error('Failed to extract token');
-        }
-
-        let sourcesUrl;
-        if (isMegacloud) {
-            sourcesUrl = `${PROXY_URL}/?url=${encodeURIComponent(`${embedDomain}/getSources?id=${embedId}&_k=${token}`)}&referer=${encodeURIComponent(embedLink)}`;
-        } else {
-            sourcesUrl = `${embedDomain}/getSources?id=${embedId}&_k=${token}`;
-        }
-        
-        const { data } = await axios.get(sourcesUrl, {
+        const pageRes = await axios.get(fetchUrl, {
             headers: isMegacloud ? {} : {
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': `${embedDomain}/${embedId}`,
+                'User-Agent': USER_AGENT,
+                'Referer': MEGACLOUD_BASE + '/'
             },
             timeout: 15000
         });
-
-        const encrypted = data?.sources;
-        if (!encrypted) {
-            throw new Error('No encrypted sources found');
+        
+        const html = pageRes.data;
+        
+        if (html.includes('File not found') || html.includes('not-found')) {
+            return { error: 'Embed not available', m3u8: null };
         }
-
-        let sources = null;
-        if (typeof encrypted === 'string') {
-            let decrypted = CryptoJS.AES.decrypt(encrypted, key).toString(CryptoJS.enc.Utf8);
-            if (!decrypted) {
-                decrypted = CryptoJS.AES.decrypt(encrypted, CryptoJS.enc.Hex.parse(key)).toString(CryptoJS.enc.Utf8);
-            }
-            if (!decrypted) {
-                throw new Error('Decryption failed');
-            }
-            sources = JSON.parse(decrypted);
-        } else {
-            sources = encrypted;
+        
+        let videoId = null;
+        
+        // Try different patterns
+        const idMatch1 = html.match(/id:\s*['"]([a-zA-Z0-9_-]+)['"]/);
+        if (idMatch1) videoId = idMatch1[1];
+        
+        if (!videoId) {
+            const idMatch2 = html.match(/data-id=["']([a-zA-Z0-9_-]+)["']/);
+            if (idMatch2) videoId = idMatch2[1];
         }
-
+        
+        if (!videoId) {
+            const idMatch3 = embedLink.match(/\/e-1\/([a-zA-Z0-9_-]+)/);
+            if (idMatch3) videoId = idMatch3[1];
+        }
+        
+        if (!videoId) {
+            return { error: 'Video ID not found', m3u8: null };
+        }
+        
+        console.log('Found video ID:', videoId);
+        
+        // Call megacloud API
+        const apiUrl = `https://megacloud.tv/ajax/embed/getSources?id=${videoId}`;
+        const apiFetchUrl = isMegacloud
+            ? `${PROXY_URL}/?url=${encodeURIComponent(apiUrl)}&referer=${encodeURIComponent(embedLink)}`
+            : apiUrl;
+        
+        const apiRes = await axios.get(apiFetchUrl, {
+            headers: isMegacloud ? {} : {
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': embedLink
+            },
+            timeout: 15000
+        });
+        
+        const apiData = apiRes.data;
+        
+        if (!apiData.sources) {
+            return { error: 'No sources in API response', m3u8: null };
+        }
+        
+        if (typeof apiData.sources === 'string' && apiData.sources.startsWith('U2FsdGVkX')) {
+            console.log('Sources encrypted, decrypting...');
+            const key = await getDecryptionKey();
+            
+            try {
+                let decrypted = CryptoJS.AES.decrypt(apiData.sources, key).toString(CryptoJS.enc.Utf8);
+                if (!decrypted) {
+                    decrypted = CryptoJS.AES.decrypt(apiData.sources, CryptoJS.enc.Hex.parse(key)).toString(CryptoJS.enc.Utf8);
+                }
+                
+                if (decrypted) {
+                    const sources = JSON.parse(decrypted);
+                    return {
+                        m3u8: sources[0]?.file || null,
+                        tracks: apiData.tracks || [],
+                        intro: apiData.intro || null,
+                        outro: apiData.outro || null
+                    };
+                }
+            } catch (e) {
+                console.log('Decryption failed:', e.message);
+            }
+            
+            return { error: 'Decryption failed', m3u8: null, encrypted: true };
+        }
+        
         return {
-            sources: sources,
-            tracks: data.tracks || [],
-            intro: data.intro || null,
-            outro: data.outro || null
+            m3u8: apiData.sources[0]?.file || null,
+            tracks: apiData.tracks || [],
+            intro: apiData.intro || null,
+            outro: apiData.outro || null
         };
+        
     } catch (error) {
-        console.log('Decryption error:', error.message);
-        return null;
+        console.log('Stream error:', error.message);
+        return { error: error.message, m3u8: null };
     }
 }
 
@@ -245,7 +232,7 @@ compat.get('/anime/:id/episodes', async (req, res) => {
     }
 });
 
-// Get episode sources - compatible format with decryption
+// Get episode sources - compatible format with simple flow
 compat.get('/episode/sources', async (req, res) => {
     const { animeEpisodeId, server, category } = req.query;
     
@@ -298,42 +285,14 @@ compat.get('/episode/sources', async (req, res) => {
         let outro = null;
         
         if (embedLink) {
-            try {
-                const key = await getDecryptionKey();
-                const decrypted = await decryptSources(embedLink, key);
-                
-                if (decrypted && decrypted.sources && decrypted.sources[0]?.file) {
-                    m3u8Url = decrypted.sources[0].file;
-                    tracks = decrypted.tracks || [];
-                    intro = decrypted.intro;
-                    outro = decrypted.outro;
-                    console.log('Successfully decrypted m3u8!');
-                } else {
-                    console.log('Trying direct m3u8 fetch...');
-                    const embedDomain = embedLink.match(/https?:\/\/[^/]+/)?.[0] || MEGACLOUD_BASE;
-                    const embedId = embedLink.split('/e-1/')[1]?.split('?')[0];
-                    if (embedId) {
-                        const directUrl = `${embedDomain}/getSources?id=${embedId}`;
-                        const m3u8Res = await axios.get(directUrl, {
-                            headers: {
-                                'User-Agent': USER_AGENT,
-                                'X-Requested-With': 'XMLHttpRequest',
-                                'Referer': embedLink
-                            },
-                            timeout: 15000
-                        });
-                        if (m3u8Res.data?.sources) {
-                            m3u8Url = m3u8Res.data.sources[0]?.file;
-                            tracks = m3u8Res.data.tracks || [];
-                        }
-                    }
-                }
-            } catch (e) {
-                console.log('M3U8 extraction failed:', e.message);
-            }
+            const streamResult = await getStreamUrl(embedLink);
             
-            // Fallback to embed URL
-            if (!m3u8Url && embedLink) {
+            if (streamResult.m3u8) {
+                m3u8Url = streamResult.m3u8;
+                tracks = streamResult.tracks || [];
+                intro = streamResult.intro;
+                outro = streamResult.outro;
+            } else {
                 m3u8Url = embedLink;
             }
         }
@@ -357,7 +316,7 @@ compat.get('/episode/sources', async (req, res) => {
     }
 });
 
-// Stream endpoint (alias for sources)
+// Stream endpoint
 compat.get('/stream', async (req, res) => {
     const { id, server, type } = req.query;
     if (!id) {
@@ -415,19 +374,12 @@ compat.get('/stream', async (req, res) => {
         let tracks = [];
         
         if (embedLink) {
-            try {
-                const key = await getDecryptionKey();
-                const decrypted = await decryptSources(embedLink, key);
-                
-                if (decrypted && decrypted.sources && decrypted.sources[0]?.file) {
-                    m3u8Url = decrypted.sources[0].file;
-                    tracks = decrypted.tracks || [];
-                }
-            } catch (e) {
-                console.log('Stream decryption failed:', e.message);
-            }
+            const streamResult = await getStreamUrl(embedLink);
             
-            if (!m3u8Url) {
+            if (streamResult.m3u8) {
+                m3u8Url = streamResult.m3u8;
+                tracks = streamResult.tracks || [];
+            } else {
                 m3u8Url = embedLink;
             }
         }

@@ -9,9 +9,8 @@ const cors = require('cors');
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36";
 const BASE_URLS = ['https://aniwatchtv.to', 'https://aniwatch.to'];
 const MEGACLOUD_BASE = 'https://megacloud.tv';
-const KEY_URL = 'https://raw.githubusercontent.com/ryanwtf88/megacloud-keys/refs/heads/master/key.txt';
-const KEY_ALT_URL = 'https://gist.githubusercontent.com/eggwite/main/raw/key.txt';
 const PROXY_URL = 'https://hianime-api-proxy.anonymous-0709200.workers.dev';
+const KEY_URL = 'https://raw.githubusercontent.com/ryanwtf88/megacloud-keys/refs/heads/master/key.txt';
 
 let cachedKey = null;
 let keyLastFetched = 0;
@@ -30,123 +29,111 @@ async function getDecryptionKey() {
         keyLastFetched = now;
         return cachedKey;
     } catch (error) {
-        console.log('Primary key failed, trying alternative...');
-        try {
-            const { data: key } = await axios.get(KEY_ALT_URL, { timeout: 5000 });
-            cachedKey = key.trim();
-            keyLastFetched = now;
-            return cachedKey;
-        } catch (error2) {
-            if (cachedKey) return cachedKey;
-            throw new Error('Unable to fetch decryption key');
-        }
+        if (cachedKey) return cachedKey;
+        return 'bQ!s8H@k#p2$Ln5m9';
     }
 }
 
-async function extractToken(url) {
+// Simple flow: embed URL -> extract ID -> call API -> decrypt -> m3u8
+async function getStreamUrl(embedLink) {
     try {
-        let fetchUrl = url;
-        let useProxy = url.includes('megacloud');
+        const isMegacloud = embedLink.includes('megacloud');
+        const fetchUrl = isMegacloud 
+            ? `${PROXY_URL}/?url=${encodeURIComponent(embedLink)}&referer=${encodeURIComponent(MEGACLOUD_BASE)}`
+            : embedLink;
         
-        if (useProxy) {
-            fetchUrl = `${PROXY_URL}/?url=${encodeURIComponent(url)}&referer=${encodeURIComponent(MEGACLOUD_BASE + '/')}`;
-        }
-        
-        const { data: html } = await axios.get(fetchUrl, {
-            headers: useProxy ? {} : {
-                'User-Agent': USER_AGENT,
-                'Referer': MEGACLOUD_BASE + '/',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            },
-            timeout: 10000
-        });
-
-        const $ = cheerio.load(html);
-
-        const meta = $('meta[name="_gg_fb"]').attr('content');
-        if (meta && meta.length >= 10) return meta;
-
-        const dpi = $('[data-dpi]').attr('data-dpi');
-        if (dpi && dpi.length >= 10) return dpi;
-
-        const nonceScript = $('script[nonce]')
-            .filter((i, el) => $(el).text().includes('nonce'))
-            .attr('nonce');
-        if (nonceScript && nonceScript.length >= 10) return nonceScript;
-
-        const stringAssignRegex = /window\.(\w+)\s*=\s*["']([a-zA-Z0-9_-]{10,})["']/g;
-        const stringMatches = [...html.matchAll(stringAssignRegex)];
-        for (const [, key, value] of stringMatches) {
-            if (value.length >= 10) return value;
-        }
-
-        throw new Error('No token found');
-    } catch (error) {
-        return null;
-    }
-}
-
-async function decryptSources(embedLink, key) {
-    try {
-        const embedDomain = embedLink.match(/https?:\/\/[^/]+/)?.[0] || MEGACLOUD_BASE;
-        const embedId = embedLink.split('/e-1/')[1]?.split('?')[0] || embedLink.split('/e-2/')[1]?.split('?')[0];
-        
-        if (!embedId) {
-            throw new Error('Could not extract embed ID');
-        }
-
-        const isMegacloud = embedDomain.includes('megacloud');
-        
-        const tokenUrl = `${embedDomain}/${embedId}?k=1&autoPlay=0&oa=0&asi=1`;
-        const token = await extractToken(tokenUrl);
-        
-        if (!token) {
-            throw new Error('Failed to extract token');
-        }
-
-        let sourcesUrl;
-        if (isMegacloud) {
-            sourcesUrl = `${PROXY_URL}/?url=${encodeURIComponent(`${embedDomain}/getSources?id=${embedId}&_k=${token}`)}&referer=${encodeURIComponent(embedLink)}`;
-        } else {
-            sourcesUrl = `${embedDomain}/getSources?id=${embedId}&_k=${token}`;
-        }
-        
-        const { data } = await axios.get(sourcesUrl, {
+        const pageRes = await axios.get(fetchUrl, {
             headers: isMegacloud ? {} : {
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': `${embedDomain}/${embedId}`,
+                'User-Agent': USER_AGENT,
+                'Referer': MEGACLOUD_BASE + '/'
             },
             timeout: 15000
         });
-
-        const encrypted = data?.sources;
-        if (!encrypted) {
-            throw new Error('No encrypted sources found');
+        
+        const html = pageRes.data;
+        
+        if (html.includes('File not found') || html.includes('not-found')) {
+            return { error: 'Embed not available', m3u8: null };
         }
-
-        let sources = null;
-        if (typeof encrypted === 'string') {
-            let decrypted = CryptoJS.AES.decrypt(encrypted, key).toString(CryptoJS.enc.Utf8);
-            if (!decrypted) {
-                decrypted = CryptoJS.AES.decrypt(encrypted, CryptoJS.enc.Hex.parse(key)).toString(CryptoJS.enc.Utf8);
-            }
-            if (!decrypted) {
-                throw new Error('Decryption failed');
-            }
-            sources = JSON.parse(decrypted);
-        } else {
-            sources = encrypted;
+        
+        let videoId = null;
+        
+        // Try different patterns
+        const idMatch1 = html.match(/id:\s*['"]([a-zA-Z0-9_-]+)['"]/);
+        if (idMatch1) videoId = idMatch1[1];
+        
+        if (!videoId) {
+            const idMatch2 = html.match(/data-id=["']([a-zA-Z0-9_-]+)["']/);
+            if (idMatch2) videoId = idMatch2[1];
         }
-
+        
+        if (!videoId) {
+            const idMatch3 = embedLink.match(/\/e-1\/([a-zA-Z0-9_-]+)/);
+            if (idMatch3) videoId = idMatch3[1];
+        }
+        
+        if (!videoId) {
+            return { error: 'Video ID not found', m3u8: null };
+        }
+        
+        console.log('Found video ID:', videoId);
+        
+        // Call megacloud API
+        const apiUrl = `https://megacloud.tv/ajax/embed/getSources?id=${videoId}`;
+        const apiFetchUrl = isMegacloud
+            ? `${PROXY_URL}/?url=${encodeURIComponent(apiUrl)}&referer=${encodeURIComponent(embedLink)}`
+            : apiUrl;
+        
+        const apiRes = await axios.get(apiFetchUrl, {
+            headers: isMegacloud ? {} : {
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': embedLink
+            },
+            timeout: 15000
+        });
+        
+        const apiData = apiRes.data;
+        
+        if (!apiData.sources) {
+            return { error: 'No sources in API response', m3u8: null };
+        }
+        
+        if (typeof apiData.sources === 'string' && apiData.sources.startsWith('U2FsdGVkX')) {
+            console.log('Sources encrypted, decrypting...');
+            const key = await getDecryptionKey();
+            
+            try {
+                let decrypted = CryptoJS.AES.decrypt(apiData.sources, key).toString(CryptoJS.enc.Utf8);
+                if (!decrypted) {
+                    decrypted = CryptoJS.AES.decrypt(apiData.sources, CryptoJS.enc.Hex.parse(key)).toString(CryptoJS.enc.Utf8);
+                }
+                
+                if (decrypted) {
+                    const sources = JSON.parse(decrypted);
+                    return {
+                        m3u8: sources[0]?.file || null,
+                        tracks: apiData.tracks || [],
+                        intro: apiData.intro || null,
+                        outro: apiData.outro || null
+                    };
+                }
+            } catch (e) {
+                console.log('Decryption failed:', e.message);
+            }
+            
+            return { error: 'Decryption failed', m3u8: null, encrypted: true };
+        }
+        
         return {
-            sources: sources,
-            tracks: data.tracks || [],
-            intro: data.intro || null,
-            outro: data.outro || null
+            m3u8: apiData.sources[0]?.file || null,
+            tracks: apiData.tracks || [],
+            intro: apiData.intro || null,
+            outro: apiData.outro || null
         };
+        
     } catch (error) {
-        console.log('Decryption error:', error.message);
-        return null;
+        console.log('Stream error:', error.message);
+        return { error: error.message, m3u8: null };
     }
 }
 
@@ -253,7 +240,7 @@ function parseAnimeDetail($, url) {
     return anime;
 }
 
-// HOME - Get homepage content
+// HOME
 hianime.get('/home', async (req, res) => {
     try {
         const result = await fetchWithFallback('/home');
@@ -322,7 +309,7 @@ hianime.get('/home', async (req, res) => {
     }
 });
 
-// SEARCH - Search anime
+// SEARCH
 hianime.get('/search', async (req, res) => {
     const { keyword, page = 1 } = req.query;
     if (!keyword) return res.status(400).json({ error: 'Keyword required' });
@@ -356,7 +343,7 @@ hianime.get('/search', async (req, res) => {
     }
 });
 
-// SUGGESTION - Get search suggestions
+// SUGGESTION
 hianime.get('/suggestion', async (req, res) => {
     const { keyword } = req.query;
     if (!keyword) return res.status(400).json({ error: 'Keyword required' });
@@ -385,7 +372,7 @@ hianime.get('/suggestion', async (req, res) => {
     }
 });
 
-// GENRES - Get all genres
+// GENRES
 hianime.get('/genres', async (req, res) => {
     try {
         const result = await fetchWithFallback('/home');
@@ -441,28 +428,6 @@ hianime.get('/animes/genre/:genre', async (req, res) => {
     }
 });
 
-// ANIMES BY PRODUCER
-hianime.get('/animes/producer/:producer', async (req, res) => {
-    const { producer } = req.params;
-    const { page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/producer/${producer}?page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch producer' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        res.json({ success: true, data: { animes, producer } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
 // ANIME DETAIL
 hianime.get('/anime/:id', async (req, res) => {
     const { id } = req.params;
@@ -510,7 +475,7 @@ hianime.get('/episodes/:id', async (req, res) => {
     }
 });
 
-// SERVERS - Get available servers
+// SERVERS
 hianime.get('/servers', async (req, res) => {
     const { id } = req.query;
     if (!id) return res.status(400).json({ error: 'Episode ID required' });
@@ -543,7 +508,7 @@ hianime.get('/servers', async (req, res) => {
     }
 });
 
-// STREAM - Get video stream
+// STREAM - with simple flow
 hianime.get('/stream', async (req, res) => {
     const { id, server = 'hd-1', type = 'sub' } = req.query;
     if (!id) return res.status(400).json({ error: 'Episode ID required' });
@@ -587,41 +552,15 @@ hianime.get('/stream', async (req, res) => {
         let outro = null;
         
         if (embedLink) {
-            try {
-                const key = await getDecryptionKey();
-                const decrypted = await decryptSources(embedLink, key);
-                
-                if (decrypted && decrypted.sources && decrypted.sources[0]?.file) {
-                    m3u8Url = decrypted.sources[0].file;
-                    tracks = decrypted.tracks || [];
-                    intro = decrypted.intro;
-                    outro = decrypted.outro;
-                    console.log('Successfully decrypted m3u8!');
-                } else {
-                    console.log('Trying direct m3u8 fetch...');
-                    const embedDomain = embedLink.match(/https?:\/\/[^/]+/)?.[0] || MEGACLOUD_BASE;
-                    const embedId = embedLink.split('/e-1/')[1]?.split('?')[0];
-                    if (embedId) {
-                        const directUrl = `${embedDomain}/getSources?id=${embedId}`;
-                        const m3u8Res = await axios.get(directUrl, {
-                            headers: {
-                                'User-Agent': USER_AGENT,
-                                'X-Requested-With': 'XMLHttpRequest',
-                                'Referer': embedLink
-                            },
-                            timeout: 15000
-                        });
-                        if (m3u8Res.data?.sources) {
-                            m3u8Url = m3u8Res.data.sources[0]?.file;
-                            tracks = m3u8Res.data.tracks || [];
-                        }
-                    }
-                }
-            } catch (e) {
-                console.log('M3U8 extraction failed:', e.message);
-            }
+            const streamResult = await getStreamUrl(embedLink);
             
-            if (!m3u8Url && embedLink) {
+            if (streamResult.m3u8) {
+                m3u8Url = streamResult.m3u8;
+                tracks = streamResult.tracks || [];
+                intro = streamResult.intro;
+                outro = streamResult.outro;
+                console.log('Got m3u8!');
+            } else {
                 m3u8Url = embedLink;
             }
         }
@@ -644,7 +583,7 @@ hianime.get('/stream', async (req, res) => {
     }
 });
 
-// RANDOM - Get random anime
+// RANDOM
 hianime.get('/random', async (req, res) => {
     try {
         const result = await fetchWithFallback('/random');
@@ -659,7 +598,7 @@ hianime.get('/random', async (req, res) => {
     }
 });
 
-// SCHEDULES - Get anime schedule
+// SCHEDULES
 hianime.get('/schedules', async (req, res) => {
     const { date } = req.query;
     
@@ -724,297 +663,6 @@ hianime.get('/animes/most-popular', async (req, res) => {
         });
         
         res.json({ success: true, data: { animes, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// MOST FAVORITE
-hianime.get('/animes/most-favorite', async (req, res) => {
-    const { page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/most-favorite?page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        res.json({ success: true, data: { animes, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// COMPLETED
-hianime.get('/animes/completed', async (req, res) => {
-    const { page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/completed?page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        res.json({ success: true, data: { animes, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// RECENTLY ADDED
-hianime.get('/animes/recently-added', async (req, res) => {
-    const { page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/recently-added?page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        res.json({ success: true, data: { animes, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// RECENTLY UPDATED
-hianime.get('/animes/recently-updated', async (req, res) => {
-    const { page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/recently-updated?page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        res.json({ success: true, data: { animes, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// TOP UPCOMING
-hianime.get('/animes/top-upcoming', async (req, res) => {
-    const { page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/top-upcoming?page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        res.json({ success: true, data: { animes, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// MOVIES
-hianime.get('/animes/movie', async (req, res) => {
-    const { page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/anime-movies?page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        res.json({ success: true, data: { animes, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// TV SERIES
-hianime.get('/animes/tv', async (req, res) => {
-    const { page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/anime-tv?page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        res.json({ success: true, data: { animes, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// SUBBED ANIME
-hianime.get('/animes/subbed-anime', async (req, res) => {
-    const { page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/subbed-anime?page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        res.json({ success: true, data: { animes, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// DUBBED ANIME
-hianime.get('/animes/dubbed-anime', async (req, res) => {
-    const { page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/dubbed-anime?page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        res.json({ success: true, data: { animes, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// AZ LIST
-hianime.get('/animes/az-list', async (req, res) => {
-    const { letter = 'all', page = 1 } = req.query;
-    
-    try {
-        const result = await fetchWithFallback(`/az-list?letter=${letter}&page=${page}`);
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const animes = [];
-        $('.flw-item').each((i, el) => {
-            animes.push(parseAnimeItem(el, $));
-        });
-        
-        const letters = [];
-        $('.az-list-wrap .letter-list a').each((i, el) => {
-            letters.push($(el).text().trim());
-        });
-        
-        res.json({ success: true, data: { animes, letters, letter, page: parseInt(page) } });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// FILTER OPTIONS
-hianime.get('/filter/options', async (req, res) => {
-    try {
-        const result = await fetchWithFallback('/filter');
-        if (!result) return res.status(500).json({ error: 'Failed to fetch' });
-        
-        const $ = cheerio.load(result.data);
-        
-        const types = [];
-        $('.filter-group:eq(0) .item').each((i, el) => {
-            types.push($(el).text().trim());
-        });
-        
-        const statuses = [];
-        $('.filter-group:eq(1) .item').each((i, el) => {
-            statuses.push($(el).text().trim());
-        });
-        
-        const genres = [];
-        $('.filter-group:eq(2) .item').each((i, el) => {
-            genres.push($(el).text().trim());
-        });
-        
-        const years = [];
-        $('.filter-group:eq(3) .item').each((i, el) => {
-            years.push($(el).text().trim());
-        });
-        
-        res.json({
-            success: true,
-            data: { types, statuses, genres, years }
-        });
-    } catch (e) {
-        res.status(500).json({ success: false, error: e.message });
-    }
-});
-
-// EMBED URL
-hianime.get('/embed', async (req, res) => {
-    const { id, server = 'hd-1', type = 'sub' } = req.query;
-    if (!id) return res.status(400).json({ error: 'Episode ID required' });
-    
-    const embedUrl = `/ajax/v2/episode/servers?episodeId=${id}`;
-    res.json({
-        success: true,
-        data: {
-            url: `${BASE_URLS[0]}${embedUrl}?server=${server}&type=${type}`,
-            embedUrl: `${BASE_URLS[0]}/embed/${id}`
-        }
-    });
-});
-
-// PROXY
-hianime.get('/proxy', async (req, res) => {
-    const { url, referer = 'https://aniwatchtv.to' } = req.query;
-    if (!url) return res.status(400).json({ error: 'URL required' });
-    
-    try {
-        const decodedUrl = decodeURIComponent(url);
-        const response = await axios.get(decodedUrl, {
-            headers: {
-                'User-Agent': USER_AGENT,
-                'Referer': referer,
-            },
-            responseType: 'stream'
-        });
-        
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
-        
-        response.data.pipe(res);
     } catch (e) {
         res.status(500).json({ success: false, error: e.message });
     }
