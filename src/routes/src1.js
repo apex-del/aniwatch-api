@@ -46,6 +46,8 @@ async function getSourceLink(serverId, serverType = 'sub') {
 }
 
 async function extractM3u8(embedLink) {
+    if (!embedLink) return null;
+    
     // Extract domain from embed link
     const match = embedLink.match(/https?:\/\/[^\/]+/);
     if (!match) return null;
@@ -88,17 +90,19 @@ src1.get('/src-server/:id', async (req, res) => {
             return res.status(404).json({ error: 'No source link found' });
         }
         
-        console.log('Got embed link:', sourceData.link);
+        // Ensure link is a string
+        const embedLink = typeof sourceData.link === 'string' ? sourceData.link : String(sourceData.link);
+        console.log('Got embed link:', embedLink);
         
         // Step 2: Try to extract m3u8 from embed
-        const sources = await extractM3u8(sourceData.link);
+        const sources = await extractM3u8(embedLink);
         
         if (sources && sources.length > 0) {
             return res.json({
                 serverSrc: [{
                     rest: sources.map(s => ({ file: s.file, type: s.type }))
                 }],
-                embed: sourceData.link,
+                embed: embedLink,
                 server: sourceData.server
             });
         }
@@ -106,7 +110,7 @@ src1.get('/src-server/:id', async (req, res) => {
         // If extraction failed, return the embed link for reference
         res.json({
             serverSrc: [],
-            embed: sourceData.link,
+            embed: embedLink,
             server: sourceData.server,
             message: 'Direct sources unavailable, embed link returned'
         });
