@@ -1,9 +1,8 @@
-// API compatibility layer - returns data in same format as old HiAnime API
+// API compatibility layer - uses working API
 
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const CryptoJS = require('crypto-js');
 
 const compat = express();
 const cors = require('cors');
@@ -13,13 +12,7 @@ const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 compat.use(cors());
 
 const BASE_URLS = ['https://aniwatchtv.to', 'https://aniwatch.to'];
-const MEGACLOUD_BASE = 'https://megacloud.tv';
-const PROXY_URL = 'https://hianime-api-proxy.anonymous-0709200.workers.dev';
-const KEY_URL = 'https://raw.githubusercontent.com/ryanwtf88/megacloud-keys/refs/heads/master/key.txt';
-
-let cachedKey = null;
-let keyLastFetched = 0;
-const KEY_CACHE_DURATION = 3600000;
+const WORKING_API = 'https://aniwatch-ifaorkapi.vercel.app';
 
 async function fetchWithFallback(paths, params = {}) {
     for (const baseUrl of BASE_URLS) {
@@ -42,126 +35,7 @@ async function fetchWithFallback(paths, params = {}) {
     return null;
 }
 
-async function getDecryptionKey() {
-    const now = Date.now();
-    if (cachedKey && (now - keyLastFetched) < KEY_CACHE_DURATION) {
-        return cachedKey;
-    }
-    try {
-        const { data: key } = await axios.get(KEY_URL, { timeout: 5000 });
-        cachedKey = key.trim();
-        keyLastFetched = now;
-        return cachedKey;
-    } catch (error) {
-        if (cachedKey) return cachedKey;
-        return 'bQ!s8H@k#p2$Ln5m9';
-    }
-}
-
-// Simple flow: embed -> extract ID -> call API -> decrypt -> m3u8
-async function getStreamUrl(embedLink) {
-    try {
-        const isMegacloud = embedLink.includes('megacloud');
-        const fetchUrl = isMegacloud 
-            ? `${PROXY_URL}/?url=${encodeURIComponent(embedLink)}&referer=${encodeURIComponent(MEGACLOUD_BASE)}`
-            : embedLink;
-        
-        const pageRes = await axios.get(fetchUrl, {
-            headers: isMegacloud ? {} : {
-                'User-Agent': USER_AGENT,
-                'Referer': MEGACLOUD_BASE + '/'
-            },
-            timeout: 15000
-        });
-        
-        const html = pageRes.data;
-        
-        if (html.includes('File not found') || html.includes('not-found')) {
-            return { error: 'Embed not available', m3u8: null };
-        }
-        
-        let videoId = null;
-        
-        // Try different patterns
-        const idMatch1 = html.match(/id:\s*['"]([a-zA-Z0-9_-]+)['"]/);
-        if (idMatch1) videoId = idMatch1[1];
-        
-        if (!videoId) {
-            const idMatch2 = html.match(/data-id=["']([a-zA-Z0-9_-]+)["']/);
-            if (idMatch2) videoId = idMatch2[1];
-        }
-        
-        if (!videoId) {
-            const idMatch3 = embedLink.match(/\/e-1\/([a-zA-Z0-9_-]+)/);
-            if (idMatch3) videoId = idMatch3[1];
-        }
-        
-        if (!videoId) {
-            return { error: 'Video ID not found', m3u8: null };
-        }
-        
-        console.log('Found video ID:', videoId);
-        
-        // Call megacloud API
-        const apiUrl = `https://megacloud.tv/ajax/embed/getSources?id=${videoId}`;
-        const apiFetchUrl = isMegacloud
-            ? `${PROXY_URL}/?url=${encodeURIComponent(apiUrl)}&referer=${encodeURIComponent(embedLink)}`
-            : apiUrl;
-        
-        const apiRes = await axios.get(apiFetchUrl, {
-            headers: isMegacloud ? {} : {
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': embedLink
-            },
-            timeout: 15000
-        });
-        
-        const apiData = apiRes.data;
-        
-        if (!apiData.sources) {
-            return { error: 'No sources in API response', m3u8: null };
-        }
-        
-        if (typeof apiData.sources === 'string' && apiData.sources.startsWith('U2FsdGVkX')) {
-            console.log('Sources encrypted, decrypting...');
-            const key = await getDecryptionKey();
-            
-            try {
-                let decrypted = CryptoJS.AES.decrypt(apiData.sources, key).toString(CryptoJS.enc.Utf8);
-                if (!decrypted) {
-                    decrypted = CryptoJS.AES.decrypt(apiData.sources, CryptoJS.enc.Hex.parse(key)).toString(CryptoJS.enc.Utf8);
-                }
-                
-                if (decrypted) {
-                    const sources = JSON.parse(decrypted);
-                    return {
-                        m3u8: sources[0]?.file || null,
-                        tracks: apiData.tracks || [],
-                        intro: apiData.intro || null,
-                        outro: apiData.outro || null
-                    };
-                }
-            } catch (e) {
-                console.log('Decryption failed:', e.message);
-            }
-            
-            return { error: 'Decryption failed', m3u8: null, encrypted: true };
-        }
-        
-        return {
-            m3u8: apiData.sources[0]?.file || null,
-            tracks: apiData.tracks || [],
-            intro: apiData.intro || null,
-            outro: apiData.outro || null
-        };
-        
-    } catch (error) {
-        console.log('Stream error:', error.message);
-        return { error: error.message, m3u8: null };
-    }
-}
-
-// Get anime info - compatible format
+// Get anime info
 compat.get('/anime/:id', async (req, res) => {
     const animeId = req.params.id;
     
@@ -207,7 +81,7 @@ compat.get('/anime/:id', async (req, res) => {
     }
 });
 
-// Get episodes list - compatible format  
+// Get episodes list
 compat.get('/anime/:id/episodes', async (req, res) => {
     const animeId = req.params.id;
     
@@ -232,7 +106,7 @@ compat.get('/anime/:id/episodes', async (req, res) => {
     }
 });
 
-// Get episode sources - compatible format with simple flow
+// Get episode sources using working API
 compat.get('/episode/sources', async (req, res) => {
     const { animeEpisodeId, server, category } = req.query;
     
@@ -241,7 +115,18 @@ compat.get('/episode/sources', async (req, res) => {
     }
     
     try {
-        const serversUrl = `/ajax/v2/episode/servers?episodeId=${animeEpisodeId}`;
+        // Parse IDs
+        const episodeMatch = animeEpisodeId.match(/ep=(\d+)/);
+        const episodeId = episodeMatch ? episodeMatch[1] : animeEpisodeId.match(/\d+/)?.[0];
+        const animeIdMatch = animeEpisodeId.match(/^(.+?)(?:\?ep=|\?server)/);
+        const animeId = animeIdMatch ? animeIdMatch[1] : animeEpisodeId.split('?')[0];
+        
+        if (!episodeId || !animeId) {
+            return res.json({ data: { sources: [], tracks: [] } });
+        }
+        
+        // Get servers
+        const serversUrl = `/ajax/v2/episode/servers?episodeId=${episodeId}`;
         const serversRes = await fetchWithFallback([serversUrl]);
         
         if (!serversRes) {
@@ -271,37 +156,45 @@ compat.get('/episode/sources', async (req, res) => {
             return res.json({ data: { sources: [], tracks: [] } });
         }
         
-        const sourceUrl = `/ajax/v2/episode/sources?id=${selectedServer.id}`;
-        const sourceRes = await fetchWithFallback([sourceUrl]);
+        // Get stream from working API
+        const apiType = type === 'dub' ? 'dub' : 'sub';
+        const streamUrl = `${WORKING_API}/api/stream?id=${animeId}?ep=${episodeId}&server=hd-1&type=${apiType}`;
         
-        if (!sourceRes) {
-            return res.json({ data: { sources: [], tracks: [] } });
-        }
-        
-        let embedLink = sourceRes.data.link;
         let m3u8Url = null;
         let tracks = [];
         let intro = null;
         let outro = null;
+        let embedLink = null;
         
-        if (embedLink) {
-            const streamResult = await getStreamUrl(embedLink);
-            
-            if (streamResult.m3u8) {
-                m3u8Url = streamResult.m3u8;
-                tracks = streamResult.tracks || [];
-                intro = streamResult.intro;
-                outro = streamResult.outro;
-            } else {
-                m3u8Url = embedLink;
+        try {
+            const streamRes = await axios.get(streamUrl, { timeout: 30000 });
+            if (streamRes.data?.success && streamRes.data?.results?.streamingLink) {
+                const link = streamRes.data.results.streamingLink;
+                m3u8Url = link.link?.file || null;
+                tracks = link.tracks || [];
+                intro = link.intro?.start || null;
+                outro = link.intro?.end || null;
             }
+        } catch (e) {
+            console.log('Working API error:', e.message);
         }
         
-        const isEmbedUrl = embedLink && m3u8Url === embedLink;
+        // Fallback
+        if (!m3u8Url) {
+            try {
+                const sourceUrl = `/ajax/v2/episode/sources?id=${selectedServer.id}`;
+                const sourceRes = await fetchWithFallback([sourceUrl]);
+                if (sourceRes) {
+                    embedLink = sourceRes.data.link;
+                }
+            } catch (e) {}
+        }
+        
+        const isEmbed = m3u8Url === embedLink || !m3u8Url;
         
         res.json({
             data: {
-                sources: m3u8Url ? [{ url: m3u8Url, type: isEmbedUrl ? 'embed' : 'hls' }] : [],
+                sources: m3u8Url ? [{ url: m3u8Url, type: 'hls' }] : (embedLink ? [{ url: embedLink, type: 'embed' }] : []),
                 embed: embedLink,
                 tracks: tracks,
                 intro: intro,
@@ -325,73 +218,35 @@ compat.get('/stream', async (req, res) => {
     
     const episodeMatch = id.match(/ep=(\d+)/);
     const episodeId = episodeMatch ? episodeMatch[1] : id.match(/\d+/)?.[0];
+    const animeIdMatch = id.match(/^(.+?)(?:\?ep=)/);
+    const animeId = animeIdMatch ? animeIdMatch[1] : id.split('?')[0];
     
-    if (!episodeId) {
-        return res.status(400).json({ error: 'Invalid episode ID format' });
+    if (!episodeId || !animeId) {
+        return res.status(400).json({ error: 'Invalid ID format' });
     }
     
     try {
-        const serversUrl = `/ajax/v2/episode/servers?episodeId=${episodeId}`;
-        const serversRes = await fetchWithFallback([serversUrl]);
+        const apiType = type === 'dub' ? 'dub' : 'sub';
+        const streamUrl = `${WORKING_API}/api/stream?id=${animeId}?ep=${episodeId}&server=hd-1&type=${apiType}`;
         
-        if (!serversRes) {
-            return res.json({ data: { sources: [], tracks: [] } });
-        }
-        
-        const $ = cheerio.load(serversRes.data.html || '');
-        
-        const targetType = type === 'dub' ? 'dub' : 'sub';
-        const servers = [];
-        
-        $(`.servers-${targetType} .server-item`).each(function() {
-            servers.push({
-                id: $(this).attr('data-id'),
-                name: $(this).find('a').text().trim().toLowerCase(),
-                type: targetType
-            });
-        });
-        
-        let selectedServer = servers[0];
-        if (server === 'hd-1') {
-            selectedServer = servers.find(s => s.name.includes('vidsrc')) || servers[0];
-        } else if (server === 'hd-2') {
-            selectedServer = servers.find(s => s.name.includes('mega')) || servers[0];
-        }
-        
-        if (!selectedServer) {
-            return res.json({ data: { sources: [], tracks: [] } });
-        }
-        
-        const sourceUrl = `/ajax/v2/episode/sources?id=${selectedServer.id}`;
-        const sourceRes = await fetchWithFallback([sourceUrl]);
-        
-        if (!sourceRes) {
-            return res.json({ data: { sources: [], tracks: [] } });
-        }
-        
-        let embedLink = sourceRes.data.link;
         let m3u8Url = null;
         let tracks = [];
         
-        if (embedLink) {
-            const streamResult = await getStreamUrl(embedLink);
-            
-            if (streamResult.m3u8) {
-                m3u8Url = streamResult.m3u8;
-                tracks = streamResult.tracks || [];
-            } else {
-                m3u8Url = embedLink;
+        try {
+            const streamRes = await axios.get(streamUrl, { timeout: 30000 });
+            if (streamRes.data?.success && streamRes.data?.results?.streamingLink) {
+                const link = streamRes.data.results.streamingLink;
+                m3u8Url = link.link?.file || null;
+                tracks = link.tracks || [];
             }
+        } catch (e) {
+            console.log('Stream API error:', e.message);
         }
-        
-        const isEmbedUrl = embedLink && m3u8Url === embedLink;
         
         res.json({
             data: {
-                sources: m3u8Url ? [{ url: m3u8Url, type: isEmbedUrl ? 'embed' : 'hls' }] : [],
-                embed: embedLink,
+                sources: m3u8Url ? [{ url: m3u8Url, type: 'hls' }] : [],
                 tracks: tracks,
-                server: selectedServer.name
             }
         });
         
